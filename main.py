@@ -63,14 +63,14 @@ def main():
         page = browser.new_page()
         
         try:
-            # Instantiate the scraper with the page object
-            scraper = InFiveScraper(page)
+            # **FIX**: Pass the browser instance to the scraper, not just the page.
+            # This is required to create new, isolated contexts for website validation.
+            scraper = InFiveScraper(browser, page)
 
             # --- Loop through and process each letter ---
             for letter in letters_to_process:
                 try:
-                    # **FIX**: Navigate to the page before scraping each letter.
-                    # This ensures a clean state and prevents errors from carried-over page content.
+                    # Navigate to the page before scraping each letter.
                     print(f"\n---\n🔄 Navigating to the main directory for letter: '{letter}'...")
                     page.goto(config.BASE_URL, timeout=config.PAGE_TIMEOUT, wait_until='domcontentloaded')
                     
@@ -91,7 +91,7 @@ def main():
                 except PlaywrightError as e:
                     print(f"❌ A Playwright error occurred for letter '{letter}': {e}")
                     print("   -> Moving to the next letter.")
-                    continue # Continue to the next letter in the loop
+                    continue
 
         except Exception as e:
             print(f"❌ A critical error occurred in the main process: {e}")
