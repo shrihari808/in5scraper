@@ -44,62 +44,93 @@ class InFiveScraper:
         try:
             print(f"\n--- Starting scrape for letter: '{letter_to_scrape}' ---")
             
-            # --- Step 1: Click the letter filter ---
-            # Based on the screenshot, the selector can be specific.
+            # --- Step 1: Click the letter filter and wait for results ---
             letter_selector = f"a.startup-alphabet-search[data-alphabet='{letter_to_scrape}']"
             print(f"  -> Clicking filter for '{letter_to_scrape}'...")
             self.page.locator(letter_selector).click()
-            # Wait for the initial batch of startups to load after the click
-            time.sleep(config.ACTION_DELAY * 2)
+
+            try:
+                self.page.wait_for_selector("div.listingItemLI", timeout=15000)
+                print("  -> Initial startup list loaded.")
+            except PlaywrightTimeoutError:
+                print(f"  -> No startups found for letter '{letter_to_scrape}' after clicking filter. Skipping.")
+                return pd.DataFrame()
 
             # --- Step 2: Repeatedly click 'Show more' and scrape ---
-            show_more_button_selector = "#LoadMoreTechStartups a.primaryBtn"
+            show_more_button_selector = "#loadMoreTechStartups a.primaryBtn"
             
             while True:
-                # Find all startup cards currently visible
+                initial_startup_count = len(self.page.locator("div.listingItemLI").all())
                 startup_elements = self.page.locator("div.listingItemLI").all()
-                new_startups_found_in_batch = 0
-
+                
                 for element in startup_elements:
                     try:
-                        profile_link = urljoin(config.BASE_URL, element.locator("a").first.get_attribute("href", timeout=5000))
+                        link_element = element.locator("a").first
+                        href = link_element.get_attribute("href", timeout=5000)
+                        if not href:
+                            continue
+
+                        profile_link = urljoin(config.BASE_URL, href)
                         if profile_link in processed_links:
                             continue
 
                         name = element.locator("h1.listingTitle").inner_text(timeout=5000).strip()
-                        industry = element.locator("h1.listingTitle + div.listingDescription span").first.inner_text(timeout=5000).strip()
-                        description = element.locator("div.listingDescription").nth(1).inner_text(timeout=5000).strip()
+                        
+                        # **FIX**: New logic to find industry and description based on labels.
+                        # It iterates through description divs and checks the <strong> tag.
+                        industry = ""
+                        description = ""
+                        
+                        description_divs = element.locator("div.listingDescription")
+                        for i in range(description_divs.count()):
+                            div = description_divs.nth(i)
+                            try:
+                                strong_tag = div.locator("strong")
+                                # Check if a <strong> tag exists within this div
+                                if strong_tag.count() > 0:
+                                    strong_text = strong_tag.inner_text(timeout=500).strip()
+                                    full_text = div.inner_text(timeout=500).strip()
+                                    
+                                    # Assign data based on the label in the <strong> tag
+                                    if "Industry" in strong_text:
+                                        industry = full_text.replace(strong_text, "", 1).strip()
+                                    elif "Profile" in strong_text:
+                                        description = full_text.replace(strong_text, "", 1).strip()
+                            except PlaywrightTimeoutError:
+                                # If a div times out, just skip it and check the next one.
+                                continue
 
                         all_startups_data.append({
                             "name": name, "in5_profile_link": profile_link,
                             "industry": industry, "profile_description": description
                         })
                         processed_links.add(profile_link)
-                        new_startups_found_in_batch += 1
                     except Exception as e:
-                        # This can happen if a card is malformed, skip it.
+                        print(f"    -> Warning: Could not process a startup card. Error: {e}")
                         continue
                 
-                if new_startups_found_in_batch > 0:
-                    print(f"  -> Scraped {new_startups_found_in_batch} new startups. Total for '{letter_to_scrape}': {len(all_startups_data)}")
-
-                # Check if the 'Show more' button is still visible and click it
-                if self.page.is_visible(show_more_button_selector):
+                # --- Step 3: Check for and click the 'Show more' button ---
+                show_more_button = self.page.locator(show_more_button_selector)
+                if show_more_button.is_visible():
                     try:
                         print("  -> Clicking 'Show more'...")
-                        self.page.locator(show_more_button_selector).click(timeout=10000)
-                        time.sleep(config.ACTION_DELAY)
+                        show_more_button.click(timeout=10000)
+                        
+                        self.page.wait_for_function(
+                            f"document.querySelectorAll('div.listingItemLI').length > {initial_startup_count}",
+                            timeout=15000
+                        )
+                        print(f"  -> More startups loaded. Total now: {len(self.page.locator('div.listingItemLI').all())}")
                     except PlaywrightTimeoutError:
-                        print("  -> 'Show more' button timed out. Finishing letter.")
+                        print("  -> 'Show more' was visible but did not load new content. Finishing letter.")
                         break
                 else:
                     print(f"  -> No more 'Show more' button for letter '{letter_to_scrape}'.")
                     break
             
-            print(f"--- Finished scraping for letter '{letter_to_scrape}'. Found {len(all_startups_data)} startups. ---")
+            print(f"--- Finished scraping for letter '{letter_to_scrape}'. Found {len(processed_links)} startups. ---")
             return pd.DataFrame(all_startups_data)
 
         except Exception as e:
             print(f"❌ An unexpected error occurred while scraping letter '{letter_to_scrape}': {e}")
-            # Return what we have so far for this letter
             return pd.DataFrame(all_startups_data)

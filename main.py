@@ -18,7 +18,7 @@ Usage:
 import os
 import argparse
 import pandas as pd
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Error as PlaywrightError
 import config
 from infive_scraper import InFiveScraper
 
@@ -63,27 +63,35 @@ def main():
         page = browser.new_page()
         
         try:
-            print(f"  -> Navigating to the in5 directory: {config.BASE_URL}")
-            page.goto(config.BASE_URL, timeout=config.PAGE_TIMEOUT, wait_until='domcontentloaded')
-            
             # Instantiate the scraper with the page object
             scraper = InFiveScraper(page)
 
             # --- Loop through and process each letter ---
             for letter in letters_to_process:
-                df = scraper.scrape_by_letter(letter)
+                try:
+                    # **FIX**: Navigate to the page before scraping each letter.
+                    # This ensures a clean state and prevents errors from carried-over page content.
+                    print(f"\n---\n🔄 Navigating to the main directory for letter: '{letter}'...")
+                    page.goto(config.BASE_URL, timeout=config.PAGE_TIMEOUT, wait_until='domcontentloaded')
+                    
+                    df = scraper.scrape_by_letter(letter)
 
-                if not df.empty:
-                    # Sanitize letter for filename
-                    filename_letter = "numeric" if letter == "#" else letter
-                    output_path = os.path.join(
-                        config.OUTPUT_DIR,
-                        f"{config.OUTPUT_FILENAME_BASE}_{filename_letter}.csv"
-                    )
-                    df.to_csv(output_path, index=False, encoding='utf-8')
-                    print(f"✅ Successfully saved {len(df)} startups to '{output_path}'")
-                else:
-                    print(f"⚠️ No startups found or saved for letter '{letter}'.")
+                    if not df.empty:
+                        # Sanitize letter for filename
+                        filename_letter = "numeric" if letter == "#" else letter
+                        output_path = os.path.join(
+                            config.OUTPUT_DIR,
+                            f"{config.OUTPUT_FILENAME_BASE}_{filename_letter}.csv"
+                        )
+                        df.to_csv(output_path, index=False, encoding='utf-8')
+                        print(f"✅ Successfully saved {len(df)} startups to '{output_path}'")
+                    else:
+                        print(f"⚠️ No startups found or saved for letter '{letter}'.")
+                
+                except PlaywrightError as e:
+                    print(f"❌ A Playwright error occurred for letter '{letter}': {e}")
+                    print("   -> Moving to the next letter.")
+                    continue # Continue to the next letter in the loop
 
         except Exception as e:
             print(f"❌ A critical error occurred in the main process: {e}")
