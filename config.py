@@ -23,13 +23,16 @@ HEADLESS_MODE = True
 # Timeout in milliseconds for page navigation.
 PAGE_TIMEOUT = 60000
 
+# Timeout in milliseconds for scanning a company's website.
+WEBSITE_SCAN_TIMEOUT = 20000
+
 # Time in seconds to wait between clicks or scrolls.
 ACTION_DELAY = 2.5
 
 # --- Concurrency Settings ---
 # The maximum number of concurrent asyncio tasks to run for web scraping.
-MAX_CONCURRENT_TASKS = 4
-# --- NEW: The maximum number of concurrent workers for processing and app scraping. ---
+MAX_CONCURRENT_TASKS = 10
+# The maximum number of concurrent workers for processing and app scraping.
 MAX_PROCESSING_WORKERS = 20
 
 
@@ -41,6 +44,12 @@ SCRAPE_CHARACTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
 # The number of app results to check per store for each company.
 # We increase this to 5 to have a pool of candidates for verification.
 NO_OF_APPS_TO_SCRAPE = 3
+
+# --- Website Login/Signup Detection ---
+# Keywords to search for in links and buttons to detect login/signup functionality.
+# The search is case-insensitive.
+LOGIN_SIGNUP_KEYWORDS = ["log in", "login", "sign in", "signin", "sign-in", "log on", "logon", "sign up", "signup", "sign-up", "register", "create account", "join now"]
+
 
 # --- Vector Store Settings ---
 # The path to the local ChromaDB database directory.

@@ -32,7 +32,7 @@ class VectorStore:
         Creates an embedding for the startup's information and adds it to ChromaDB.
 
         Args:
-            startup_info (dict): A dictionary containing startup details including 'app_details'.
+            startup_info (dict): A dictionary containing startup details.
         """
         try:
             company_name = startup_info['name']
@@ -52,11 +52,13 @@ class VectorStore:
             embedding = self.embedding_model.encode(document_content).tolist()
 
             # Prepare metadata. Store detailed app info as a JSON string.
+            has_login = startup_info.get('has_login_signup', False)
             metadata = {
                 "name": company_name,
                 "website": startup_info.get('website', ''),
                 "industry": startup_info.get('industry', ''),
                 "has_app": "Yes" if app_details else "No",
+                "has_login_signup": "Yes" if has_login else "No", # Add the new field
                 "app_details_json": json.dumps(app_details) if app_details else "[]"
             }
 
@@ -67,7 +69,7 @@ class VectorStore:
                 documents=[document_content],
                 metadatas=[metadata]
             )
-            print(f"  -> Successfully vectorized and stored '{company_name}'. Has App: {metadata['has_app']}")
+            print(f"  -> Successfully vectorized and stored '{company_name}'. Has App: {metadata['has_app']}, Has Login: {metadata['has_login_signup']}")
 
         except Exception as e:
             print(f"❌ Error processing and storing '{startup_info.get('name', 'Unknown')}': {e}")

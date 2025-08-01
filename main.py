@@ -12,78 +12,90 @@ from playwright.async_api import async_playwright
 import asyncio
 import glob
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 # Project modules
 import config
 from infive_scraper import InFiveScraper
 from app_scraper import AppScraper
 from vector_store import VectorStore
+from website_scraper import WebsiteScraper
 
 # --- Global instances for processing ---
-# Initialized once to be shared across threads.
+# These are initialized in the processing function to be shared across threads.
 app_scraper = None
+website_scraper = None
 vector_store = None
 
-def process_single_company(company_data):
+def process_single_company(company_data, do_app_processing: bool, do_website_processing: bool):
     """
     The core logic for processing one company. This function is executed by worker threads.
-    It scrapes for app info, prepares a flattened data row for CSV export,
-    and adds the combined data to the vector store.
+    It conditionally scrapes for app info and website data based on flags,
+    prepares a flattened data row, and adds the data to the vector store.
     """
-    global app_scraper, vector_store
+    global app_scraper, vector_store, website_scraper
     try:
         company_name = company_data['name']
+        website_url = company_data.get('website', '')
         print(f"--- Processing {company_name} ---")
 
-        # Scrape for app information
-        app_details = app_scraper.scrape_apps(company_name)
+        # --- Conditionally perform scraping ---
+        app_details = []
+        if do_app_processing:
+            if not app_scraper:
+                raise RuntimeError("AppScraper not initialized. It should be initialized in the main processing function.")
+            app_details = app_scraper.scrape_apps(company_name)
+
+        has_login_or_signup = False
+        if do_website_processing:
+            if not website_scraper:
+                raise RuntimeError("WebsiteScraper not initialized.")
+            has_login_or_signup = website_scraper.check_for_login_or_signup(website_url)
 
         # --- Prepare flattened data for CSV ---
-        # Start with the base company info
         output_row = {
             "name": company_name,
             "in5_profile_link": company_data.get('in5_profile_link', ''),
-            "website": company_data.get('website', ''),
+            "website": website_url,
             "industry": company_data.get('industry', ''),
-            "profile_description": company_data.get('profile_description', '')
+            "profile_description": company_data.get('profile_description', ''),
+            "has_login_or_signup": has_login_or_signup
         }
 
-        # Separate app details by store
-        play_store_app = next((app for app in app_details if app['store'] == 'Google Play'), None)
-        apple_store_app = next((app for app in app_details if app['store'] == 'Apple App Store'), None)
+        # Add app data to the row if it was scraped
+        if do_app_processing:
+            play_store_app = next((app for app in app_details if app['store'] == 'Google Play'), None)
+            apple_store_app = next((app for app in app_details if app['store'] == 'Apple App Store'), None)
 
-        # Add Google Play data if it exists
-        if play_store_app:
-            output_row.update({
-                "play_store_app_title": play_store_app.get('title'),
-                "play_store_app_description": play_store_app.get('description'),
-                "play_store_app_genre": play_store_app.get('genre'),
-                "play_store_app_score": play_store_app.get('score'),
-                "play_store_app_ratings": play_store_app.get('ratings'),
-                "play_store_app_developer": play_store_app.get('developer'),
-                "play_store_app_url": play_store_app.get('url')
-            })
-
-        # Add Apple App Store data if it exists
-        if apple_store_app:
-            output_row.update({
-                "apple_store_app_title": apple_store_app.get('title'),
-                "apple_store_app_description": apple_store_app.get('description'),
-                "apple_store_app_genre": apple_store_app.get('genre'),
-                "apple_store_app_score": apple_store_app.get('score'),
-                "apple_store_app_ratings": apple_store_app.get('ratings'),
-                "apple_store_app_developer": apple_store_app.get('developer'),
-                "apple_store_app_url": apple_store_app.get('url')
-            })
+            if play_store_app:
+                output_row.update({
+                    "play_store_app_title": play_store_app.get('title'),
+                    "play_store_app_description": play_store_app.get('description'),
+                    "play_store_app_genre": play_store_app.get('genre'),
+                    "play_store_app_score": play_store_app.get('score'),
+                    "play_store_app_ratings": play_store_app.get('ratings'),
+                    "play_store_app_developer": play_store_app.get('developer'),
+                    "play_store_app_url": play_store_app.get('url')
+                })
+            if apple_store_app:
+                output_row.update({
+                    "apple_store_app_title": apple_store_app.get('title'),
+                    "apple_store_app_description": apple_store_app.get('description'),
+                    "apple_store_app_genre": apple_store_app.get('genre'),
+                    "apple_store_app_score": apple_store_app.get('score'),
+                    "apple_store_app_ratings": apple_store_app.get('ratings'),
+                    "apple_store_app_developer": apple_store_app.get('developer'),
+                    "apple_store_app_url": apple_store_app.get('url')
+                })
 
         # --- Vectorize the data ---
-        # Prepare data for vectorization (this part remains the same)
         startup_data_for_vector_store = {
             "name": company_name,
             "profile_description": company_data.get('profile_description', ''),
-            "website": company_data.get('website', ''),
+            "website": website_url,
             "industry": company_data.get('industry', ''),
-            "app_details": app_details
+            "app_details": app_details,
+            "has_login_signup": has_login_or_signup
         }
         vector_store.add_startup_data(startup_data_for_vector_store)
 
@@ -93,18 +105,18 @@ def process_single_company(company_data):
         print(f"❌ Critical error processing company '{company_data.get('name', 'N/A')}': {e}")
         return None
 
-
-def process_and_vectorize_data_concurrently():
+def process_data_concurrently(do_app_processing: bool, do_website_processing: bool):
     """
     Loads scraped data, then uses a thread pool to concurrently enrich it
-    with app info, store it in a vector DB, and save the combined results to a CSV.
+    with app info and/or website data, store it in a vector DB, and save
+    the combined results to a CSV.
     """
-    global app_scraper, vector_store
+    global app_scraper, vector_store, website_scraper
     print("\n--- Starting Concurrent Data Processing and Vectorization ---")
     
-    csv_files = glob.glob(os.path.join(config.OUTPUT_DIR, "*.csv"))
+    csv_files = glob.glob(os.path.join(config.OUTPUT_DIR, f"{config.OUTPUT_FILENAME_BASE}_*.csv"))
     if not csv_files:
-        print("❌ No CSV files found. Please run with --scrape first.")
+        print(f"❌ No CSV files found in '{config.OUTPUT_DIR}'. Please run with --scrape first.")
         return
 
     df = pd.concat((pd.read_csv(f) for f in csv_files), ignore_index=True)
@@ -115,17 +127,23 @@ def process_and_vectorize_data_concurrently():
     
     print(f"Found {len(companies_to_process)} total startups to process from {len(csv_files)} files.")
 
-    # Initialize shared instances
-    app_scraper = AppScraper()
+    # Initialize shared instances based on flags
     vector_store = VectorStore()
+    if do_app_processing:
+        print("-> App processing is enabled.")
+        app_scraper = AppScraper()
+    if do_website_processing:
+        print("-> Website processing is enabled.")
+        website_scraper = WebsiteScraper()
 
     all_processed_data = []
-    # Use a ThreadPoolExecutor to process companies in parallel
+    # Use functools.partial to pass the processing flags to the worker function
+    worker_function = partial(process_single_company, 
+                              do_app_processing=do_app_processing, 
+                              do_website_processing=do_website_processing)
+
     with ThreadPoolExecutor(max_workers=config.MAX_PROCESSING_WORKERS, thread_name_prefix='CompanyProcessor') as executor:
-        # map will return the results as they are completed
-        results = executor.map(process_single_company, companies_to_process)
-        
-        # Collect all non-None results
+        results = executor.map(worker_function, companies_to_process)
         all_processed_data = [res for res in results if res is not None]
 
     # --- Save the combined data to a single CSV file ---
@@ -133,16 +151,14 @@ def process_and_vectorize_data_concurrently():
         print(f"\n--- Saving {len(all_processed_data)} processed startups to combined.csv ---")
         combined_df = pd.DataFrame(all_processed_data)
         
-        # Define the full header to ensure column order
         headers = [
-            "name", "in5_profile_link", "website", "industry", "profile_description",
+            "name", "in5_profile_link", "website", "industry", "profile_description", "has_login_or_signup",
             "play_store_app_title", "play_store_app_description", "play_store_app_genre",
             "play_store_app_score", "play_store_app_ratings", "play_store_app_developer", "play_store_app_url",
             "apple_store_app_title", "apple_store_app_description", "apple_store_app_genre",
             "apple_store_app_score", "apple_store_app_ratings", "apple_store_app_developer", "apple_store_app_url"
         ]
         
-        # Reorder DataFrame columns according to the header list
         combined_df = combined_df.reindex(columns=headers)
 
         output_path = os.path.join(config.OUTPUT_DIR, "combined.csv")
@@ -198,16 +214,18 @@ async def main_async(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape and process the in5 startup directory.")
-    parser.add_argument("--scrape", action="store_true", help="Enable the scraping workflow.")
+    parser.add_argument("--scrape", action="store_true", help="Enable the initial scraping workflow to gather company data.")
     parser.add_argument("--letter", type=str, help="Scrape a single letter. Requires --scrape.")
     parser.add_argument("--all", action="store_true", help="Scrape all letters. Requires --scrape.")
-    parser.add_argument("--process", action="store_true", help="Process CSVs to find app data and vectorize.")
+    parser.add_argument("--process-apps", action="store_true", help="Process data to find app store information.")
+    parser.add_argument("--process-websites", action="store_true", help="Process data to check websites for login/signup features.")
+    
     args = parser.parse_args()
 
     if args.scrape:
         asyncio.run(main_async(args))
-    elif args.process:
-        process_and_vectorize_data_concurrently()
+    elif args.process_apps or args.process_websites:
+        process_data_concurrently(do_app_processing=args.process_apps, do_website_processing=args.process_websites)
     else:
         parser.print_help()
-        print("\nError: Please specify a workflow: --scrape or --process.")
+        print("\nError: Please specify a workflow: --scrape, --process-apps, or --process-websites.")
