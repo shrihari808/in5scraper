@@ -2,164 +2,104 @@
 
 """
 This module contains the core logic for scraping the in5 startup directory.
-It uses Playwright to handle dynamic content loading (infinite scroll) and
-to extract details from each startup's profile page.
+It is designed to be controlled by main.py to scrape all startups for a
+single, specified letter, making the process modular and robust.
 """
 
 import time
 import pandas as pd
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from urllib.parse import urljoin
 import config
 
 class InFiveScraper:
     """
-    A scraper for the in5.ae startup directory.
+    A scraper for the in5.ae startup directory, focused on scraping one
+    alphabetical section at a time.
     """
 
-    def __init__(self):
-        """Initializes the scraper, setting up browser and page to None."""
-        self.playwright = None
-        self.browser = None
-        self.page = None
+    def __init__(self, page):
+        """
+        Initializes the scraper with an existing Playwright page object.
+        
+        Args:
+            page: A Playwright page object to perform actions on.
+        """
+        self.page = page
 
-    def _initialize_scraper(self):
+    def scrape_by_letter(self, letter_to_scrape):
         """
-        Initializes the Playwright instance and launches a browser.
-        This setup is separated to be called once per run.
-        """
-        print("🚀 Initializing Playwright and launching browser...")
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=config.HEADLESS_MODE
-        )
-        self.page = self.browser.new_page()
-        print("✅ Browser initialized.")
-
-    def _scrape_startup_details(self, profile_url):
-        """
-        Scrapes detailed information from a single startup's profile page.
+        Scrapes all startups for a specific letter by clicking the filter,
+        then repeatedly clicking 'Show more' and processing the results.
 
         Args:
-            profile_url (str): The URL of the startup's profile page.
+            letter_to_scrape (str): The character to filter by (e.g., 'A', '#').
 
         Returns:
-            dict: A dictionary containing the startup's description, website,
-                  and social media links.
+            pandas.DataFrame: A DataFrame containing all startups for the given letter.
         """
-        details = {
-            "description": None,
-            "website": None,
-            "linkedin": None,
-            "twitter": None,
-            "facebook": None,
-            "instagram": None,
-        }
-        try:
-            print(f"    -> Visiting details page: {profile_url}")
-            self.page.goto(profile_url, timeout=config.PAGE_TIMEOUT)
-            
-            # Extract description
-            description_selector = ".startup-description"
-            if self.page.is_visible(description_selector):
-                details["description"] = self.page.locator(description_selector).inner_text().strip()
-
-            # Extract website and social links
-            links_selector = ".startup-links a"
-            links = self.page.locator(links_selector).all()
-            for link_locator in links:
-                href = link_locator.get_attribute("href")
-                if not href:
-                    continue
-                
-                if "linkedin.com" in href:
-                    details["linkedin"] = href
-                elif "twitter.com" in href:
-                    details["twitter"] = href
-                elif "facebook.com" in href:
-                    details["facebook"] = href
-                elif "instagram.com" in href:
-                    details["instagram"] = href
-                else:
-                    # Assume the first non-social link is the website
-                    if not details["website"]:
-                         details["website"] = href
-            
-        except PlaywrightTimeoutError:
-            print(f"      ⚠️ Timeout error while visiting {profile_url}")
-        except Exception as e:
-            print(f"      ❌ An unexpected error occurred on {profile_url}: {e}")
-        
-        return details
-
-
-    def scrape_all_startups(self):
-        """
-        Orchestrates the entire scraping process. It navigates to the main directory,
-        handles infinite scrolling, extracts basic info, and then visits each
-        profile to get detailed information.
-
-        Returns:
-            pandas.DataFrame: A DataFrame containing all the scraped startup data.
-        """
-        self._initialize_scraper()
         all_startups_data = []
+        processed_links = set()
+        
         try:
-            print(f"  -> Navigating to the in5 directory: {config.BASE_URL}")
-            self.page.goto(config.BASE_URL, timeout=config.PAGE_TIMEOUT)
+            print(f"\n--- Starting scrape for letter: '{letter_to_scrape}' ---")
+            
+            # --- Step 1: Click the letter filter ---
+            # Based on the screenshot, the selector can be specific.
+            letter_selector = f"a.startup-alphabet-search[data-alphabet='{letter_to_scrape}']"
+            print(f"  -> Clicking filter for '{letter_to_scrape}'...")
+            self.page.locator(letter_selector).click()
+            # Wait for the initial batch of startups to load after the click
+            time.sleep(config.ACTION_DELAY * 2)
 
-            # --- Handle Infinite Scroll ---
-            print("  -> Scrolling to load all startups. This may take a moment...")
-            last_height = self.page.evaluate("document.body.scrollHeight")
+            # --- Step 2: Repeatedly click 'Show more' and scrape ---
+            show_more_button_selector = "#LoadMoreTechStartups a.primaryBtn"
+            
             while True:
-                self.page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(config.SCROLL_DELAY)
-                new_height = self.page.evaluate("document.body.scrollHeight")
-                if new_height == last_height:
-                    print("  -> Reached the end of the page.")
+                # Find all startup cards currently visible
+                startup_elements = self.page.locator("div.listingItemLI").all()
+                new_startups_found_in_batch = 0
+
+                for element in startup_elements:
+                    try:
+                        profile_link = urljoin(config.BASE_URL, element.locator("a").first.get_attribute("href", timeout=5000))
+                        if profile_link in processed_links:
+                            continue
+
+                        name = element.locator("h1.listingTitle").inner_text(timeout=5000).strip()
+                        industry = element.locator("h1.listingTitle + div.listingDescription span").first.inner_text(timeout=5000).strip()
+                        description = element.locator("div.listingDescription").nth(1).inner_text(timeout=5000).strip()
+
+                        all_startups_data.append({
+                            "name": name, "in5_profile_link": profile_link,
+                            "industry": industry, "profile_description": description
+                        })
+                        processed_links.add(profile_link)
+                        new_startups_found_in_batch += 1
+                    except Exception as e:
+                        # This can happen if a card is malformed, skip it.
+                        continue
+                
+                if new_startups_found_in_batch > 0:
+                    print(f"  -> Scraped {new_startups_found_in_batch} new startups. Total for '{letter_to_scrape}': {len(all_startups_data)}")
+
+                # Check if the 'Show more' button is still visible and click it
+                if self.page.is_visible(show_more_button_selector):
+                    try:
+                        print("  -> Clicking 'Show more'...")
+                        self.page.locator(show_more_button_selector).click(timeout=10000)
+                        time.sleep(config.ACTION_DELAY)
+                    except PlaywrightTimeoutError:
+                        print("  -> 'Show more' button timed out. Finishing letter.")
+                        break
+                else:
+                    print(f"  -> No more 'Show more' button for letter '{letter_to_scrape}'.")
                     break
-                last_height = new_height
-
-            # --- Extract Initial Startup Info ---
-            print("  -> Extracting initial list of startups...")
-            startup_elements = self.page.locator(".col-lg-3.col-md-4.col-sm-6.col-xs-12").all()
-            initial_info = []
-            for element in startup_elements:
-                name_element = element.locator("h4")
-                link_element = element.locator("a")
-                
-                name = name_element.inner_text().strip()
-                profile_link = link_element.get_attribute("href")
-                
-                if name and profile_link:
-                    initial_info.append({"name": name, "profile_link": profile_link})
-
-            print(f"✅ Found {len(initial_info)} startups. Now scraping details for each...")
-
-            # --- Scrape Detailed Info for Each Startup ---
-            for i, info in enumerate(initial_info):
-                print(f"\n({i+1}/{len(initial_info)}) Scraping details for: {info['name']}")
-                details = self._scrape_startup_details(info['profile_link'])
-                
-                # Combine initial info with scraped details
-                combined_data = {**info, **details}
-                all_startups_data.append(combined_data)
-                
+            
+            print(f"--- Finished scraping for letter '{letter_to_scrape}'. Found {len(all_startups_data)} startups. ---")
             return pd.DataFrame(all_startups_data)
 
-        except PlaywrightTimeoutError:
-            print(f"❌ Timed out while loading the main directory page: {config.BASE_URL}")
-            return pd.DataFrame()
         except Exception as e:
-            print(f"❌ An unexpected error occurred during the main scraping process: {e}")
-            return pd.DataFrame()
-        finally:
-            self.close()
-    
-    def close(self):
-        """Closes the browser and the Playwright instance gracefully."""
-        if self.browser:
-            self.browser.close()
-        if self.playwright:
-            self.playwright.stop()
-        print("\n✅ Browser and Playwright instance closed.")
-
+            print(f"❌ An unexpected error occurred while scraping letter '{letter_to_scrape}': {e}")
+            # Return what we have so far for this letter
+            return pd.DataFrame(all_startups_data)
