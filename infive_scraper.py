@@ -4,11 +4,8 @@
 This module contains the core logic for scraping the in5 startup directory.
 It is designed to be controlled by main.py to scrape all startups for a
 single, specified letter, making the process modular and robust.
-
-This version has been updated to use Playwright's async API.
 """
 
-import asyncio
 import pandas as pd
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 from urllib.parse import urljoin
@@ -37,7 +34,7 @@ class InFiveScraper:
         then repeatedly clicking 'Show more' and processing the results.
 
         Args:
-            letter_to_scrape (str): The character to filter by (e.g., 'A', '#').
+            letter_to_scrape (str): The character to filter by (e.g., 'A').
 
         Returns:
             pandas.DataFrame: A DataFrame containing all startups for the given letter.
@@ -48,30 +45,13 @@ class InFiveScraper:
         try:
             print(f"\n--- Starting scrape for letter: '{letter_to_scrape}' ---")
             
-            # --- Step 1: Wait for the initial page to load and get a baseline ---
-            try:
-                await self.page.wait_for_selector("div.listingItemLI a", timeout=15000)
-                first_startup_href_before_filter = await self.page.locator("div.listingItemLI a").first.get_attribute("href")
-            except PlaywrightTimeoutError:
-                print(f"  -> Page did not load initial startup list for '{letter_to_scrape}'. Skipping letter.")
-                return pd.DataFrame()
-
-            # --- Step 2: Click the letter filter and wait for the content to be replaced ---
+            # --- Step 1: Click the letter filter ---
             letter_selector = f"a.startup-alphabet-search[data-alphabet='{letter_to_scrape}']"
             print(f"  -> Clicking filter for '{letter_to_scrape}'...")
             await self.page.locator(letter_selector).click()
+            await self.page.wait_for_timeout(3000) # Static wait for filter to apply
 
-            try:
-                await self.page.wait_for_function(
-                    f"document.querySelector('div.listingItemLI a')?.getAttribute('href') !== '{first_startup_href_before_filter}'",
-                    timeout=10000
-                )
-                print("  -> Filtered startup list loaded.")
-            except PlaywrightTimeoutError:
-                print(f"  -> No unique startups found for letter '{letter_to_scrape}'. The list did not change after filtering.")
-                return pd.DataFrame()
-
-            # --- Step 3: Repeatedly click 'Show more' and scrape ---
+            # --- Step 2: Repeatedly click 'Show more' and scrape ---
             show_more_button_selector = "#loadMoreTechStartups a.primaryBtn"
             
             while True:
@@ -88,6 +68,8 @@ class InFiveScraper:
                         profile_link = urljoin(config.BASE_URL, href)
                         if profile_link in processed_links:
                             continue
+                        
+                        processed_links.add(profile_link)
 
                         name = await element.locator("h1.listingTitle").inner_text(timeout=5000)
                         name = name.strip()
@@ -114,57 +96,25 @@ class InFiveScraper:
                                         website_url = content
                             except PlaywrightTimeoutError:
                                 continue
-
-                        # --- Website Validation Step ---
-                        is_valid_startup = True
-                        if website_url:
-                            if not website_url.startswith(('http://', 'https://')):
-                                website_url = 'http://' + website_url
-                            
-                            print(f"    -> Validating website: {website_url} ...")
-                            validation_context = None
-                            try:
-                                # Create a new, isolated browser context for each validation.
-                                validation_context = await self.browser.new_context()
-                                validation_page = await validation_context.new_page()
-                                
-                                response = await validation_page.goto(website_url, timeout=15000, wait_until='domcontentloaded')
-                                
-                                if not response or not response.ok:
-                                    print(f"    -> ❌ Invalid response for {website_url}. Status: {response.status if response else 'N/A'}")
-                                    is_valid_startup = False
-                                else:
-                                    print(f"    -> ✅ Website is valid.")
-                            except PlaywrightError:
-                                print(f"    -> ❌ Website failed to load: {website_url}")
-                                is_valid_startup = False
-                            finally:
-                                # Close the entire context, not just the page.
-                                if validation_context:
-                                    await validation_context.close()
                         
-                        if is_valid_startup:
-                            all_startups_data.append({
-                                "name": name, "in5_profile_link": profile_link,
-                                "website": website_url, "industry": industry,
-                                "profile_description": description
-                            })
-                        else:
-                            print(f"    -> Skipping startup '{name}' due to invalid website.")
-                        
-                        processed_links.add(profile_link)
+                        all_startups_data.append({
+                            "name": name, "in5_profile_link": profile_link,
+                            "website": website_url, "industry": industry,
+                            "profile_description": description
+                        })
 
                     except Exception as e:
                         print(f"    -> Warning: Could not process a startup card. Error: {e}")
                         continue
                 
-                # --- Step 4: Check for and click the 'Show more' button ---
+                # --- Step 3: Check for and click the 'Show more' button ---
                 show_more_button = self.page.locator(show_more_button_selector)
                 if await show_more_button.is_visible():
                     try:
                         print("  -> Clicking 'Show more'...")
                         await show_more_button.click(timeout=10000)
                         
+                        # Wait for new content to load
                         await self.page.wait_for_function(
                             f"document.querySelectorAll('div.listingItemLI').length > {initial_startup_count}",
                             timeout=15000
@@ -178,9 +128,14 @@ class InFiveScraper:
                     print(f"  -> No more 'Show more' button for letter '{letter_to_scrape}'.")
                     break
             
-            print(f"--- Finished scraping for letter '{letter_to_scrape}'. Found {len(all_startups_data)} valid startups. ---")
-            return pd.DataFrame(all_startups_data)
+            print(f"--- Finished scraping for letter '{letter_to_scrape}'. Found {len(all_startups_data)} startups. ---")
+            # Remove duplicates before returning
+            if all_startups_data:
+                df = pd.DataFrame(all_startups_data)
+                df.drop_duplicates(subset=['in5_profile_link'], inplace=True)
+                return df
+            return pd.DataFrame()
 
         except Exception as e:
             print(f"❌ An unexpected error occurred while scraping letter '{letter_to_scrape}': {e}")
-            return pd.DataFrame(all_startups_data)
+            return pd.DataFrame()
