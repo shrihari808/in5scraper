@@ -3,18 +3,26 @@
 """
 This module contains the logic for scraping app stores to find out
 if a company has a mobile application, focusing on specific data points.
+It includes validation to ensure the found app belongs to the company.
 """
 
 import requests
 from google_play_scraper import search as search_play_store, app as app_play_store
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
+import re
+import json
 
 class AppScraper:
     """
     Searches for and scrapes detailed data from the Google Play Store and Apple App Store
-    for a given company.
+    for a given company, with validation to match the app to the company.
     """
+
+    def _clean_company_name(self, name):
+        """Removes common suffixes like 'LLC', 'FZCO', etc., for better matching."""
+        # This regex removes common business suffixes and punctuation.
+        return re.sub(r'[,.\s]*(llc|fzco|inc|ltd|co|gmbh)[\s.]*$', '', name, flags=re.IGNORECASE).strip()
 
     def _format_google_play_details(self, details):
         """Formats Google Play app details into a structured dictionary."""
@@ -61,34 +69,61 @@ class AppScraper:
             return []
 
     def _scrape_google_play(self, company_name):
-        """Scrapes the Google Play Store for a company's app."""
+        """
+        Scrapes the Google Play Store, searching for an app and validating
+        it by matching the developer name with the company name.
+        """
         try:
+            # Search for multiple apps to find the best match.
             search_results = search_play_store(query=company_name, n_hits=config.NO_OF_APPS_TO_SCRAPE, country="ae")
-            if search_results:
-                app_id = search_results[0]['appId']
-                print(f"    -> Found Google Play app: {app_id}")
+            
+            cleaned_company_name = self._clean_company_name(company_name).lower()
+
+            for result in search_results:
+                app_id = result['appId']
+                # Fetch detailed info to get the developer name
                 details = app_play_store(app_id, lang='en', country='ae')
-                return self._format_google_play_details(details)
+                developer_name = details.get('developer', '').lower()
+                
+                # --- Validation Logic ---
+                # Check if the cleaned company name is in the developer's name.
+                if cleaned_company_name in developer_name:
+                    print(f"    -> Found and validated Google Play app: {app_id}")
+                    return self._format_google_play_details(details)
+
         except Exception as e:
             print(f"    ⚠️ An error occurred during Google Play scraping for '{company_name}': {e}")
         return None
 
     def _scrape_apple_store(self, company_name):
-        """Scrapes the Apple App Store for a company's app."""
+        """
+        Scrapes the Apple App Store, searching for an app and validating
+        it by matching the developer name (artistName) with the company name.
+        """
         try:
+            # Search for multiple apps to find the best match.
             search_results = self._search_apple_app_store(term=company_name, country="ae", limit=config.NO_OF_APPS_TO_SCRAPE)
-            if search_results:
-                app_details = search_results[0]
-                app_name = app_details.get('trackName')
-                print(f"    -> Found Apple App Store app: {app_name}")
-                return self._format_apple_store_details(app_details)
+            
+            cleaned_company_name = self._clean_company_name(company_name).lower()
+
+            for result in search_results:
+                developer_name = result.get('artistName', '').lower()
+                
+                # --- Validation Logic ---
+                # Check if the cleaned company name is in the developer's name.
+                if cleaned_company_name in developer_name:
+                    app_name = result.get('trackName')
+                    print(f"    -> Found and validated Apple App Store app: {app_name}")
+                    return self._format_apple_store_details(result)
+
         except Exception as e:
             print(f"    ⚠️ An error occurred during Apple Store scraping for '{company_name}': {e}")
         return None
 
     def scrape_apps(self, company_name):
         """
-        Searches both app stores concurrently for a company's app.
+        Searches both app stores concurrently for a company's app and prints
+        the combined results as a JSON object for debugging.
         
         Returns:
             list: A list of dictionaries, where each dictionary contains detailed app info.
@@ -106,7 +141,11 @@ class AppScraper:
                 except Exception as e:
                     print(f"    ⚠️ An error occurred in an app scraping thread: {e}")
         
-        if not app_details_list:
-            print(f"  -> No mobile apps found for '{company_name}' in either store.")
+        # --- Debugging Output ---
+        # Print the final list of found apps as a JSON object.
+        if app_details_list:
+            print(f"  -> JSON Data for '{company_name}': {json.dumps(app_details_list, indent=2)}")
+        else:
+            print(f"  -> No validated mobile apps found for '{company_name}' in either store.")
             
         return app_details_list

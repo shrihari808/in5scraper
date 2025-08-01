@@ -27,7 +27,8 @@ vector_store = None
 def process_single_company(company_data):
     """
     The core logic for processing one company. This function is executed by worker threads.
-    It scrapes for app info and adds the combined data to the vector store.
+    It scrapes for app info, prepares a flattened data row for CSV export,
+    and adds the combined data to the vector store.
     """
     global app_scraper, vector_store
     try:
@@ -37,25 +38,66 @@ def process_single_company(company_data):
         # Scrape for app information
         app_details = app_scraper.scrape_apps(company_name)
 
-        # Prepare data for vectorization
-        startup_data = {
+        # --- Prepare flattened data for CSV ---
+        # Start with the base company info
+        output_row = {
+            "name": company_name,
+            "in5_profile_link": company_data.get('in5_profile_link', ''),
+            "website": company_data.get('website', ''),
+            "industry": company_data.get('industry', ''),
+            "profile_description": company_data.get('profile_description', '')
+        }
+
+        # Separate app details by store
+        play_store_app = next((app for app in app_details if app['store'] == 'Google Play'), None)
+        apple_store_app = next((app for app in app_details if app['store'] == 'Apple App Store'), None)
+
+        # Add Google Play data if it exists
+        if play_store_app:
+            output_row.update({
+                "play_store_app_title": play_store_app.get('title'),
+                "play_store_app_description": play_store_app.get('description'),
+                "play_store_app_genre": play_store_app.get('genre'),
+                "play_store_app_score": play_store_app.get('score'),
+                "play_store_app_ratings": play_store_app.get('ratings'),
+                "play_store_app_developer": play_store_app.get('developer'),
+                "play_store_app_url": play_store_app.get('url')
+            })
+
+        # Add Apple App Store data if it exists
+        if apple_store_app:
+            output_row.update({
+                "apple_store_app_title": apple_store_app.get('title'),
+                "apple_store_app_description": apple_store_app.get('description'),
+                "apple_store_app_genre": apple_store_app.get('genre'),
+                "apple_store_app_score": apple_store_app.get('score'),
+                "apple_store_app_ratings": apple_store_app.get('ratings'),
+                "apple_store_app_developer": apple_store_app.get('developer'),
+                "apple_store_app_url": apple_store_app.get('url')
+            })
+
+        # --- Vectorize the data ---
+        # Prepare data for vectorization (this part remains the same)
+        startup_data_for_vector_store = {
             "name": company_name,
             "profile_description": company_data.get('profile_description', ''),
             "website": company_data.get('website', ''),
             "industry": company_data.get('industry', ''),
             "app_details": app_details
         }
+        vector_store.add_startup_data(startup_data_for_vector_store)
 
-        # Add to vector store
-        vector_store.add_startup_data(startup_data)
+        return output_row
+
     except Exception as e:
         print(f"❌ Critical error processing company '{company_data.get('name', 'N/A')}': {e}")
+        return None
 
 
 def process_and_vectorize_data_concurrently():
     """
     Loads scraped data, then uses a thread pool to concurrently enrich it
-    with app info and store it in a vector DB.
+    with app info, store it in a vector DB, and save the combined results to a CSV.
     """
     global app_scraper, vector_store
     print("\n--- Starting Concurrent Data Processing and Vectorization ---")
@@ -66,8 +108,9 @@ def process_and_vectorize_data_concurrently():
         return
 
     df = pd.concat((pd.read_csv(f) for f in csv_files), ignore_index=True)
+    df.drop_duplicates(subset=['in5_profile_link'], inplace=True)
     df.dropna(subset=['name'], inplace=True)
-    df.fillna({'profile_description': ''}, inplace=True) # Ensure description is not NaN
+    df.fillna({'profile_description': ''}, inplace=True)
     companies_to_process = df.to_dict('records')
     
     print(f"Found {len(companies_to_process)} total startups to process from {len(csv_files)} files.")
@@ -76,10 +119,37 @@ def process_and_vectorize_data_concurrently():
     app_scraper = AppScraper()
     vector_store = VectorStore()
 
+    all_processed_data = []
     # Use a ThreadPoolExecutor to process companies in parallel
     with ThreadPoolExecutor(max_workers=config.MAX_PROCESSING_WORKERS, thread_name_prefix='CompanyProcessor') as executor:
-        # Submit all companies to the executor
-        executor.map(process_single_company, companies_to_process)
+        # map will return the results as they are completed
+        results = executor.map(process_single_company, companies_to_process)
+        
+        # Collect all non-None results
+        all_processed_data = [res for res in results if res is not None]
+
+    # --- Save the combined data to a single CSV file ---
+    if all_processed_data:
+        print(f"\n--- Saving {len(all_processed_data)} processed startups to combined.csv ---")
+        combined_df = pd.DataFrame(all_processed_data)
+        
+        # Define the full header to ensure column order
+        headers = [
+            "name", "in5_profile_link", "website", "industry", "profile_description",
+            "play_store_app_title", "play_store_app_description", "play_store_app_genre",
+            "play_store_app_score", "play_store_app_ratings", "play_store_app_developer", "play_store_app_url",
+            "apple_store_app_title", "apple_store_app_description", "apple_store_app_genre",
+            "apple_store_app_score", "apple_store_app_ratings", "apple_store_app_developer", "apple_store_app_url"
+        ]
+        
+        # Reorder DataFrame columns according to the header list
+        combined_df = combined_df.reindex(columns=headers)
+
+        output_path = os.path.join(config.OUTPUT_DIR, "combined.csv")
+        combined_df.to_csv(output_path, index=False, encoding='utf-8')
+        print(f"✅ Successfully saved combined data to '{output_path}'")
+    else:
+        print("--- No data was processed to save to combined.csv ---")
         
     print("\n--- ✅ All startups have been processed and vectorized. ---")
 

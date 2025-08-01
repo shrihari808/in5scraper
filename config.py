@@ -30,7 +30,7 @@ ACTION_DELAY = 2.5
 # The maximum number of concurrent asyncio tasks to run for web scraping.
 MAX_CONCURRENT_TASKS = 4
 # --- NEW: The maximum number of concurrent workers for processing and app scraping. ---
-MAX_PROCESSING_WORKERS = 8
+MAX_PROCESSING_WORKERS = 20
 
 
 # --- Characters to Scrape ---
@@ -39,7 +39,8 @@ SCRAPE_CHARACTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
 
 # --- App Scraping Settings ---
 # The number of app results to check per store for each company.
-NO_OF_APPS_TO_SCRAPE = 1
+# We increase this to 5 to have a pool of candidates for verification.
+NO_OF_APPS_TO_SCRAPE = 3
 
 # --- Vector Store Settings ---
 # The path to the local ChromaDB database directory.
