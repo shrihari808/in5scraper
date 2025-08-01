@@ -18,13 +18,18 @@ OUTPUT_FILENAME_BASE = "infive_startups"
 
 # Set to True to run the browser in headless mode (without a UI).
 # Set to False for debugging to see the browser actions.
-HEADLESS_MODE = False
+HEADLESS_MODE = True
 
 # Timeout in milliseconds for page navigation.
 PAGE_TIMEOUT = 60000
 
 # Time in seconds to wait between clicks or scrolls.
 ACTION_DELAY = 2.5
+
+# --- NEW: Concurrency Settings ---
+# The maximum number of concurrent asyncio tasks to run.
+# Adjust based on your system's resources and network capacity.
+MAX_CONCURRENT_TASKS = 4
 
 # --- NEW: Characters to Scrape ---
 # The list of characters to iterate through when using the --all flag.
